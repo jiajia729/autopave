@@ -1,0 +1,20 @@
+{
+	"schemaVersion": 1,
+	"id": "autopave",
+	"version": "${version}",
+	"name": "AutoPave 自動鋪地",
+	"description": "純客戶端：在框選的範圍內，自動把你身邊的空格補上手上的方塊。",
+	"authors": ["jiajia729"],
+	"license": "CC0-1.0",
+	"icon": "assets/autopave/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["tw.jiajia.autopave.AutoPaveClient"]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

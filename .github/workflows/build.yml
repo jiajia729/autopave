@@ -1,0 +1,72 @@
+name: build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'microsoft'
+      - name: build
+        id: build
+        continue-on-error: true
+        run: |
+          chmod +x ./gradlew
+          set -o pipefail
+          ./gradlew build --stacktrace 2>&1 | tee build.log
+
+      # 把原版類別的方法列表存下來，方便對照 26.3 的名稱
+      - name: dump api
+        if: always()
+        run: |
+          mkdir -p ci
+          JAR=""
+          for j in $(find ~/.gradle/caches .gradle -name '*.jar' 2>/dev/null | grep -i minecraft); do
+            if unzip -l "$j" 2>/dev/null | grep -q 'net/minecraft/client/multiplayer/MultiPlayerGameMode.class'; then JAR="$j"; break; fi
+          done
+          echo "jar: $JAR" > ci/api.txt
+          if [ -n "$JAR" ]; then
+            for c in net.minecraft.client.multiplayer.MultiPlayerGameMode net.minecraft.world.inventory.ContainerInput \
+                     net.minecraft.world.entity.player.Inventory net.minecraft.world.entity.player.Player \
+                     net.minecraft.client.player.LocalPlayer net.minecraft.client.gui.Gui net.minecraft.world.phys.BlockHitResult \
+                     net.minecraft.world.level.block.state.BlockBehaviour\$BlockStateBase net.minecraft.world.item.ItemStack; do
+              echo "=== $c" >> ci/api.txt
+              javap -cp "$JAR" -p "$c" >> ci/api.txt 2>&1 || true
+            done
+          fi
+          cp build.log ci/build.log || true
+          echo "${{ steps.build.outcome }}" > ci/outcome.txt
+          ls build/libs >> ci/outcome.txt 2>/dev/null || true
+
+      - name: publish ci log
+        if: always()
+        run: |
+          cd ci
+          git init -q -b ci
+          git config user.name github-actions
+          git config user.email actions@github.com
+          git add -A
+          git commit -qm "ci ${{ github.sha }}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci
+
+      - name: release jar
+        if: steps.build.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest build/libs/autopave-*.jar --title "AutoPave 最新版" \
+            --notes "下載 autopave-x.y.z.jar 放進 .minecraft/mods（需要 Fabric Loader 與 Fabric API，Minecraft 26.3）"
+
+      - name: fail if build failed
+        if: steps.build.outcome != 'success'
+        run: exit 1
