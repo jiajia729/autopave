@@ -16,6 +16,7 @@ import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.component.SwingAnimation;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
@@ -166,7 +167,7 @@ public final class Paver {
 			stop(mc);
 			return;
 		}
-		if (mc.screen != null) return; // 開著背包或聊天室時暫停
+		if (mc.gui.screen() != null) return; // 開著背包或聊天室時暫停
 
 		if (ticks % 20 == 0) {
 			remainingCache = countRemaining(level);
@@ -244,8 +245,10 @@ public final class Paver {
 		BlockHitResult bhr = new BlockHitResult(hit, f, t.support(), false);
 		InteractionResult r = mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, bhr);
 		retryAt.put(t.pos().asLong(), ticks + RETRY_TICKS);
+		if (r instanceof InteractionResult.Success ok && ok.swingSource() == InteractionResult.SwingSource.PREDICTED) {
+			player.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, false); // 跟原版右鍵一樣揮手
+		}
 		if (r.consumesAction()) {
-			player.swing(InteractionHand.MAIN_HAND);
 			placed++;
 			if (remainingCache > 0) remainingCache--;
 		}
