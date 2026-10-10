@@ -1,6 +1,9 @@
 package tw.jiajia.autopave;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import net.minecraft.client.Minecraft;
@@ -9,6 +12,7 @@ import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
+import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Inventory;
@@ -17,9 +21,11 @@ import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.SwingAnimation;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -44,13 +50,16 @@ public final class Paver {
 	private boolean active;
 	private Item item;
 	private int preferredSlot;
-	private int speed = 8; // 每秒放幾格
+	private int speed = 5; // 每秒放幾格
 	private double budget;
 	private long ticks;
 	private long lastRefillTick = -100;
 	private int placed;
 	private int remainingCache = -1;
 	private final Map<Long, Long> retryAt = new HashMap<>();
+	private Target pending;
+	private float savedYaw;
+	private float savedPitch;
 
 	private Paver() {
 	}
@@ -84,7 +93,7 @@ public final class Paver {
 
 	void setSpeed(Minecraft mc, int bps) {
 		speed = bps;
-		say(mc, "§e放置速度：§f每秒 " + bps + " 格" + (bps > 10 ? "  §6（太快可能被反作弊踢）" : ""));
+		say(mc, "§e放置速度：§f每秒 " + bps + " 格" + (bps > 8 ? "  §6（太快可能被反作弊擋）" : ""));
 	}
 
 	void clear(Minecraft mc) {
@@ -157,17 +166,64 @@ public final class Paver {
 
 	// ───────────────────────── 每 tick ─────────────────────────
 
-	void tick(Minecraft mc) {
-		ticks++;
+	/**
+	 * 在玩家本身的 tick 之前：選好要放的格子，先把視線轉過去。
+	 * 這樣原版這個 tick 送出的移動封包就會帶著正確的視角，伺服器（和反作弊）看到的是「看著那個面按右鍵」。
+	 */
+	void preTick(Minecraft mc) {
+		pending = null;
 		if (!active) return;
 		LocalPlayer player = mc.player;
 		ClientLevel level = mc.level;
 		if (player == null || level == null || mc.gameMode == null) return;
+		if (player.isSpectator() || mc.gui.screen() != null) return;
+
+		budget = Math.min(budget + speed / 20.0, 1.5);
+		if (budget < 1.0) return;
+
+		Supply s = ensureItemInHand(mc, player);
+		if (s == Supply.NONE) {
+			say(mc, "§c背包裡的方塊用完了，補貨後再按 O 繼續（這次放了 " + placed + " 格，還差約 " + remainingCache + " 格）");
+			active = false;
+			return;
+		}
+		if (s == Supply.WAIT) return;
+
+		Target t = findTarget(level, player);
+		if (t == null) return;
+		savedYaw = player.getYRot();
+		savedPitch = player.getXRot();
+		player.setYRot(t.yaw());
+		player.setXRot(t.pitch());
+		pending = t;
+	}
+
+	/** 玩家 tick 之後：用現在的位置和視角重新瞄一次，確定真的看著那個面才放，然後把視角還原。 */
+	void tick(Minecraft mc) {
+		ticks++;
+		LocalPlayer player = mc.player;
+		ClientLevel level = mc.level;
+		Target t = pending;
+		pending = null;
+		if (t != null && player != null) {
+			try {
+				if (active && level != null && mc.gameMode != null && level.getBlockState(t.pos()).canBeReplaced()) {
+					BlockHitResult aim = raycast(level, player, player.getEyePosition(), player.getLookAngle());
+					if (aim != null && aim.getBlockPos().equals(t.support()) && aim.getDirection() == t.face()) {
+						place(mc, player, t, aim);
+						budget -= 1.0;
+					}
+				}
+				retryAt.put(t.pos().asLong(), ticks + RETRY_TICKS);
+			} finally {
+				restoreView(player);
+			}
+		}
+		if (!active || player == null || level == null) return;
 		if (player.isSpectator()) {
 			stop(mc);
 			return;
 		}
-		if (mc.gui.screen() != null) return; // 開著背包或聊天室時暫停
 
 		if (ticks % 20 == 0) {
 			remainingCache = countRemaining(level);
@@ -176,23 +232,7 @@ public final class Paver {
 				active = false;
 				return;
 			}
-			retryAt.values().removeIf(t -> t < ticks);
-		}
-
-		budget = Math.min(budget + speed / 20.0, Math.max(1.0, speed / 20.0) + 1.0);
-		while (budget >= 1.0) {
-			Supply s = ensureItemInHand(mc, player);
-			if (s == Supply.NONE) {
-				say(mc, "§c背包裡的方塊用完了，補貨後再按 O 繼續（這次放了 " + placed + " 格，還差約 " + remainingCache + " 格）");
-				active = false;
-				return;
-			}
-			if (s == Supply.WAIT) return;
-
-			Target t = findTarget(level, player);
-			if (t == null) break;
-			place(mc, player, t);
-			budget -= 1.0;
+			retryAt.values().removeIf(v -> v < ticks);
 		}
 		if (ticks % 10 == 0) {
 			player.sendOverlayMessage(Component.literal("§6自動鋪地 §f已放 " + placed + "  還差約 " + remainingCache
@@ -200,51 +240,93 @@ public final class Paver {
 		}
 	}
 
-	private record Target(BlockPos pos, BlockPos support, Direction face) {
+	/** 把視角還原成玩家自己的，連「上一幀」也一起還原，畫面才不會抖。 */
+	private void restoreView(LocalPlayer player) {
+		player.setYRot(savedYaw);
+		player.setXRot(savedPitch);
+		player.yRotO = savedYaw;
+		player.xRotO = savedPitch;
 	}
 
-	/** 在伸手可及的範圍內，找最近、而且旁邊有方塊可以貼的空格。 */
+	private record Target(BlockPos pos, BlockPos support, Direction face, float yaw, float pitch) {
+	}
+
+	private record Cand(BlockPos pos, double d) {
+	}
+
+	/** 在伸手可及的範圍內，找最近、而且「從眼睛看得到旁邊那個方塊的面」的空格。 */
 	private Target findTarget(ClientLevel level, LocalPlayer player) {
 		Vec3 eye = player.getEyePosition();
 		double reach = Math.min(player.blockInteractionRange(), 4.5) - REACH_MARGIN;
 		int y = y();
-		if (Math.abs(eye.y - (y + 0.5)) > reach) return null;
+		if (Math.abs(eye.y - (y + 0.5)) > reach + 1) return null;
 
 		int x0 = Math.max(minX(), (int) Math.floor(eye.x - reach)), x1 = Math.min(maxX(), (int) Math.ceil(eye.x + reach));
 		int z0 = Math.max(minZ(), (int) Math.floor(eye.z - reach)), z1 = Math.min(maxZ(), (int) Math.ceil(eye.z + reach));
 		AABB body = player.getBoundingBox();
 
-		Target best = null;
-		double bestD = Double.MAX_VALUE;
-		BlockPos.MutableBlockPos m = new BlockPos.MutableBlockPos();
+		List<Cand> cands = new ArrayList<>();
 		for (int x = x0; x <= x1; x++) {
 			for (int z = z0; z <= z1; z++) {
-				m.set(x, y, z);
+				BlockPos p = new BlockPos(x, y, z);
 				double d = eye.distanceToSqr(x + 0.5, y + 0.5, z + 0.5);
-				if (d > reach * reach || d >= bestD) continue;
-				if (!level.getBlockState(m).canBeReplaced()) continue;
-				Long due = retryAt.get(m.asLong());
+				if (d > (reach + 1) * (reach + 1)) continue;
+				if (!level.getBlockState(p).canBeReplaced()) continue;
+				Long due = retryAt.get(p.asLong());
 				if (due != null && due > ticks) continue;
-				if (body.intersects(new AABB(m))) continue;
-				for (Direction dir : SUPPORT_ORDER) {
-					BlockPos n = m.relative(dir);
-					BlockState ns = level.getBlockState(n);
-					if (ns.canBeReplaced() || ns.hasBlockEntity()) continue; // 不點箱子之類會開介面的方塊
-					best = new Target(m.immutable(), n, dir.getOpposite());
-					bestD = d;
-					break;
+				if (body.intersects(new AABB(p))) continue;
+				cands.add(new Cand(p, d));
+			}
+		}
+		cands.sort(Comparator.comparingDouble(Cand::d));
+
+		int tried = 0;
+		for (Cand c : cands) {
+			if (++tried > 40) break;
+			for (Direction dir : SUPPORT_ORDER) {
+				BlockPos n = c.pos().relative(dir);
+				BlockState ns = level.getBlockState(n);
+				if (ns.canBeReplaced() || ns.hasBlockEntity()) continue; // 不點箱子之類會開介面的方塊
+				Direction face = dir.getOpposite();
+				Vec3 fc = Vec3.atCenterOf(n).add(face.getStepX() * 0.5, face.getStepY() * 0.5, face.getStepZ() * 0.5);
+				// 面要朝向眼睛（背對你的面，真人也點不到）
+				Vec3 toEye = eye.subtract(fc);
+				if (toEye.x * face.getStepX() + toEye.y * face.getStepY() + toEye.z * face.getStepZ() <= 0.02) continue;
+				for (Vec3 aimPt : aimPoints(fc, face)) {
+					if (eye.distanceTo(aimPt) > reach) continue;
+					Vec3 dirv = aimPt.subtract(eye).normalize();
+					BlockHitResult h = raycast(level, player, eye, dirv);
+					if (h == null || !h.getBlockPos().equals(n) || h.getDirection() != face) continue;
+					float yaw = (float) (Math.toDegrees(Math.atan2(dirv.z, dirv.x)) - 90.0);
+					float pitch = (float) -Math.toDegrees(Math.atan2(dirv.y, Math.sqrt(dirv.x * dirv.x + dirv.z * dirv.z)));
+					float cur = player.getYRot();
+					yaw = cur + Mth.wrapDegrees(yaw - cur);
+					return new Target(c.pos(), n, face, yaw, Mth.clamp(pitch, -90f, 90f));
 				}
 			}
 		}
-		return best;
+		return null;
 	}
 
-	private void place(Minecraft mc, LocalPlayer player, Target t) {
-		Direction f = t.face();
-		Vec3 hit = Vec3.atCenterOf(t.support()).add(f.getStepX() * 0.5, f.getStepY() * 0.5, f.getStepZ() * 0.5);
-		BlockHitResult bhr = new BlockHitResult(hit, f, t.support(), false);
+	/** 面的中心，和往內縮一點的四個點（中心被擋住時換個地方瞄）。 */
+	private static Vec3[] aimPoints(Vec3 center, Direction face) {
+		Direction.Axis ax = face.getAxis();
+		double k = 0.3;
+		Vec3 u = ax == Direction.Axis.X ? new Vec3(0, k, 0) : new Vec3(k, 0, 0);
+		Vec3 v = ax == Direction.Axis.Z ? new Vec3(0, k, 0) : new Vec3(0, 0, k);
+		return new Vec3[] { center, center.add(u), center.subtract(u), center.add(v), center.subtract(v) };
+	}
+
+	/** 跟原版準星一樣，從眼睛沿著方向打一條線，回傳第一個碰到的方塊面。 */
+	private static BlockHitResult raycast(ClientLevel level, LocalPlayer player, Vec3 eye, Vec3 dir) {
+		Vec3 end = eye.add(dir.scale(6.0));
+		BlockHitResult h = level.clip(new ClipContext(eye, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player));
+		if (h == null || h.getType() != HitResult.Type.BLOCK) return null;
+		return h;
+	}
+
+	private void place(Minecraft mc, LocalPlayer player, Target t, BlockHitResult bhr) {
 		InteractionResult r = mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, bhr);
-		retryAt.put(t.pos().asLong(), ticks + RETRY_TICKS);
 		if (r instanceof InteractionResult.Success ok && ok.swingSource() == InteractionResult.SwingSource.PREDICTED) {
 			player.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, false); // 跟原版右鍵一樣揮手
 		}

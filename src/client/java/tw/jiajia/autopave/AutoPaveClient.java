@@ -43,6 +43,11 @@ public class AutoPaveClient implements ClientModInitializer {
 		keyPos2 = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.autopave.pos2", InputConstants.Type.KEYBOARD, SDLScancode.SDL_SCANCODE_RIGHTBRACKET, category));
 		keyToggle = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.autopave.toggle", InputConstants.Type.KEYBOARD, SDLScancode.SDL_SCANCODE_O, category));
 
+		// 玩家 tick 之前先轉向要放的位置（見 Paver.preTick）
+		ClientTickEvents.START_CLIENT_TICK.register(client -> {
+			if (client.player != null && client.level != null) Paver.INSTANCE.preTick(client);
+		});
+
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			if (client.player == null || client.level == null) {
 				Paver.INSTANCE.stop(null);
