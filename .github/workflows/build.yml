@@ -29,20 +29,15 @@ jobs:
         if: always()
         run: |
           mkdir -p ci
-          JAR=""
-          for j in $(find ~/.gradle/caches .gradle -name '*.jar' 2>/dev/null | grep -i minecraft); do
-            if unzip -l "$j" 2>/dev/null | grep -q 'net/minecraft/client/multiplayer/MultiPlayerGameMode.class'; then JAR="$j"; break; fi
+          JARS=$(find ~/.gradle/caches/fabric-loom -name 'minecraft-*.jar' 2>/dev/null | grep -v sources | tr '\n' ':')
+          echo "jars: $JARS" > ci/api.txt
+          for c in net.minecraft.client.Minecraft net.minecraft.client.multiplayer.MultiPlayerGameMode net.minecraft.world.inventory.ContainerInput \
+                   net.minecraft.world.entity.player.Inventory net.minecraft.world.entity.player.Player net.minecraft.world.entity.LivingEntity \
+                   net.minecraft.client.player.LocalPlayer net.minecraft.world.item.component.SwingAnimation net.minecraft.world.phys.BlockHitResult \
+                   net.minecraft.world.level.block.state.BlockBehaviour\$BlockStateBase net.minecraft.world.item.ItemStack; do
+            echo "=== $c" >> ci/api.txt
+            javap -cp "$JARS" -p "$c" >> ci/api.txt 2>&1 || true
           done
-          echo "jar: $JAR" > ci/api.txt
-          if [ -n "$JAR" ]; then
-            for c in net.minecraft.client.multiplayer.MultiPlayerGameMode net.minecraft.world.inventory.ContainerInput \
-                     net.minecraft.world.entity.player.Inventory net.minecraft.world.entity.player.Player \
-                     net.minecraft.client.player.LocalPlayer net.minecraft.client.gui.Gui net.minecraft.world.phys.BlockHitResult \
-                     net.minecraft.world.level.block.state.BlockBehaviour\$BlockStateBase net.minecraft.world.item.ItemStack; do
-              echo "=== $c" >> ci/api.txt
-              javap -cp "$JAR" -p "$c" >> ci/api.txt 2>&1 || true
-            done
-          fi
           cp build.log ci/build.log || true
           echo "${{ steps.build.outcome }}" > ci/outcome.txt
           ls build/libs >> ci/outcome.txt 2>/dev/null || true

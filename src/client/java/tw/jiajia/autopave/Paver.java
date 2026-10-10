@@ -194,8 +194,8 @@ public final class Paver {
 			budget -= 1.0;
 		}
 		if (ticks % 10 == 0) {
-			player.displayClientMessage(Component.literal("§6自動鋪地 §f已放 " + placed + "  還差約 " + remainingCache
-					+ "  背包 " + countItem(player)), true);
+			player.sendOverlayMessage(Component.literal("§6自動鋪地 §f已放 " + placed + "  還差約 " + remainingCache
+					+ "  背包 " + countItem(player)));
 		}
 	}
 
@@ -306,7 +306,7 @@ public final class Paver {
 	// ───────────────────────── 小工具 ─────────────────────────
 
 	static void say(Minecraft mc, String s) {
-		if (mc != null && mc.player != null) mc.player.displayClientMessage(Component.literal(s), false);
+		if (mc != null && mc.player != null) mc.player.sendSystemMessage(Component.literal(s));
 	}
 
 	private static String fmt(BlockPos p) {
